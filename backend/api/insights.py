@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from ..database import get_session
 from ..models.insight import Insight, InsightCreate, InsightRead
 from ..models.metric import Metric
+from ..agents.analytics_agent import analytics_agent
 
 router = APIRouter(prefix="/api/insights", tags=["insights"])
 
@@ -54,39 +55,142 @@ async def generate_insights_for_metric(
     session: Session = Depends(get_session)
 ):
     """
-    Generate AI insights for a specific metric
-    Demonstrates study guide principle: AI agent integration
+    Generate AI insights for a specific metric using LangGraph agent
+    Demonstrates study guide principle: AI agent integration with real LLM
     
-    Note: This endpoint will be enhanced in Phase 3 with actual LangGraph agent
-    For now, it demonstrates the API structure and async patterns
+    This endpoint integrates the LangGraph analytics agent to generate
+    intelligent business insights from metric data.
     """
     # Verify metric exists
     metric = session.get(Metric, metric_id)
     if not metric:
         raise HTTPException(status_code=404, detail="Metric not found")
     
-    # TODO: In Phase 3, this will integrate with LangGraph agent
-    # For now, create a placeholder insight
-    # Demonstrates study guide principle: Pydantic model validation
-    placeholder_insight = InsightCreate(
-        insight_text=f"AI analysis for {metric.name}: This metric shows {metric.value} with category {metric.category}. Further analysis will be available when LangGraph agent is implemented.",
-        confidence_score=0.7,
-        insight_type="preliminary",
-        metric_id=metric_id
-    )
+    try:
+        # Get all metrics for context (agent works better with multiple data points)
+        # Demonstrates study guide principle: providing context to AI agents
+        statement = select(Metric).where(Metric.category == metric.category)
+        related_metrics = session.exec(statement).all()
+        
+        # Convert to format expected by agent
+        # Demonstrates study guide principle: data preparation for AI
+        metrics_data = [
+            {
+                "name": m.name,
+                "value": m.value,
+                "category": m.category,
+                "description": m.description
+            }
+            for m in related_metrics
+        ]
+        
+        # Generate insights using LangGraph agent
+        # Demonstrates study guide principle: stateful AI agent execution
+        agent_result = await analytics_agent.generate_insights(metrics_data)
+        
+        # Store insights in database
+        # Demonstrates study guide principle: SQLModel integration with AI results
+        created_insights = []
+        for insight_data in agent_result["insights"]:
+            db_insight = Insight(
+                insight_text=insight_data["text"],
+                confidence_score=insight_data["confidence"],
+                insight_type=insight_data["type"],
+                metric_id=metric_id
+            )
+            session.add(db_insight)
+            created_insights.append(db_insight)
+        
+        session.commit()
+        
+        # Refresh to get IDs
+        for insight in created_insights:
+            session.refresh(insight)
+        
+        return {
+            "message": "AI insights generated successfully",
+            "insights_count": len(created_insights),
+            "confidence_score": agent_result["confidence_score"],
+            "insight_ids": [insight.id for insight in created_insights],
+            "analysis": agent_result["analysis"]
+        }
+        
+    except Exception as e:
+        # Handle AI agent errors gracefully
+        # Demonstrates study guide principle: error handling in AI integration
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate AI insights: {str(e)}"
+        )
+
+
+@router.post("/generate/all")
+async def generate_insights_for_all_metrics(session: Session = Depends(get_session)):
+    """
+    Generate AI insights for all metrics using LangGraph agent
+    Demonstrates study guide principle: batch AI processing
     
-    # Store insight in database
-    # Demonstrates study guide principle: SQLModel integration
-    db_insight = Insight.model_validate(placeholder_insight)
-    session.add(db_insight)
-    session.commit()
-    session.refresh(db_insight)
-    
-    return {
-        "message": "Insight generated successfully",
-        "insight_id": db_insight.id,
-        "note": "This is a placeholder. Real AI insights will be available in Phase 3 with LangGraph integration."
-    }
+    This endpoint processes all available metrics to generate comprehensive
+    business insights using the LangGraph analytics agent.
+    """
+    try:
+        # Get all metrics
+        # Demonstrates study guide principle: comprehensive data analysis
+        statement = select(Metric).order_by(Metric.created_at.desc())
+        all_metrics = session.exec(statement).all()
+        
+        if not all_metrics:
+            raise HTTPException(status_code=404, detail="No metrics found")
+        
+        # Convert to format expected by agent
+        metrics_data = [
+            {
+                "name": m.name,
+                "value": m.value,
+                "category": m.category,
+                "description": m.description
+            }
+            for m in all_metrics
+        ]
+        
+        # Generate insights using LangGraph agent
+        # Demonstrates study guide principle: comprehensive AI analysis
+        agent_result = await analytics_agent.generate_insights(metrics_data)
+        
+        # Store insights in database (associate with first metric for simplicity)
+        # In a real application, you might create a separate "global insights" table
+        created_insights = []
+        for insight_data in agent_result["insights"]:
+            db_insight = Insight(
+                insight_text=insight_data["text"],
+                confidence_score=insight_data["confidence"],
+                insight_type=insight_data["type"],
+                metric_id=all_metrics[0].id  # Associate with first metric
+            )
+            session.add(db_insight)
+            created_insights.append(db_insight)
+        
+        session.commit()
+        
+        # Refresh to get IDs
+        for insight in created_insights:
+            session.refresh(insight)
+        
+        return {
+            "message": "Comprehensive AI insights generated successfully",
+            "insights_count": len(created_insights),
+            "confidence_score": agent_result["confidence_score"],
+            "insight_ids": [insight.id for insight in created_insights],
+            "analysis": agent_result["analysis"],
+            "processed_metrics": len(all_metrics)
+        }
+        
+    except Exception as e:
+        # Handle AI agent errors gracefully
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate comprehensive AI insights: {str(e)}"
+        )
 
 
 @router.delete("/{insight_id}")
